@@ -1,0 +1,294 @@
+---
+title: "GWAS Project"
+author: "Keenan Elliott"
+date: "2023-10-10"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Introduction
+
+Single nucleotide polymorphisms (SNPs) represent differences between individuals in a single position or nucleotide in the genome. These SNPs are commonly studied through Genome Wide Association Studies (GWAS), which report SNPs that statistically correlate with a specific phenotype or disease state [1]. However, given the high dimensionality associated with SNP data, it can be difficult to determine true positives from false positives or control for the type I error. Here, we utilized the 1000 genomes project data to visualize the false positive rate among uncorrelated case-control data. 
+The 1000 genomes project is a database of the genotypes of over 2300 individuals from 5 continents and 19 populations. The data are publicly available and were produced on the Illumina Omni2.5 platform. Here, we utilized a cleaned subset of this dataset that had undergone quality control (QC) processing by Roslin et al. The QC dataset was obtained from https://tcag.ca/tools/1000genomes.html, and contained 1,989,184 SNPs with 1756 individuals. It should be noted that the report from Roslin et al. states that the final dataset should contain 1736 quasi-unrelated individuals with consistent ethnicity and well-inferred sex. Some additional data processing steps were required to remedy this discrepancy; the details will be outlined below. 
+In this report, I outline the steps taken to perform a GWAS of the data discussed above. To do this, individuals were randomized to either case or control and logistic regression was performed using PLINK on the subsequent phenotypic groups. In addition, an attempt was made to replicate the PCA performed in the study by Roslin et al.
+
+
+# Methods
+
+## Data Acquisition
+
+Data was acquired from The Centre for Applied Genomics at Sick Kids at https://tcag.ca/tools/1000genomes.html. The data downloaded had passed quality control and consisted of 1756 individuals and 1,989,184 SNPs produced on the Illumina Omni2.5 platform. 
+
+## Software 
+
+The analysis was performed using Plink (V 1.90) for macOS and was accessed through the command line. The steps used were modified from the document obtained from https://github.com/sugolov/GWAS-Workshop/blob/master/GWAS_Manual_PLINK_1.9.pdf. Data cleaning and visualization were performed using R (V. 4.3.1) with R Studio. 
+
+## Data Cleaning and Visualizations
+
+Data was cleaned in R prior to analysis using Plink to exclude individuals lacking sex data or having sex data opposite to those reported in the dataset and individuals not matching their reported ancestry. Phenotype data was randomly generated using the random binary data generator rbinom and assigned to individuals. Visualizations were created in R, using the ggplot2 and qqman libraries. 
+
+# Results 
+
+## Prepping and Cleaning the Dataset for Plink
+
+After loading the dataset into R Studio, I noted more individuals were present in the .fam file than was specified in the report. The downloaded .fam file consisted of 1756 individuals instead of the 1736 reported by Roslin et al. To remedy this issue, I referred to the report and identified four individuals that did not cluster well with their continental groups (HG01241, HG01242, HG01108, NA20314) as well as one individual in the dataset with a genotype consistent with the opposite sex they had been reported to (NA21310). Moreover, there were an additional 15 individuals with no reported sex that were removed from the dataset. With these 20 individuals removed, the total number of individuals in the dataset were 1736, which matched the reported number by Roslin et al. The code to read the data and perform the removal steps is included below. The final 1736 individuals were copied to a new data table and written to a new file titled phenotypes.txt. This file contained the randomly generated assignment to either case or control for each of the 1736 individuals in the final dataset. 
+
+
+
+```{r}
+bim <- read.table("indep.bim",
+header = FALSE,
+sep = "",
+fill = TRUE,
+quote = "",
+check.names = FALSE)
+
+fam= read.table("indep.fam",
+header = FALSE,
+sep = "",
+fill = TRUE,
+quote = "",
+check.names = FALSE)
+
+
+```
+
+
+```{r}
+
+
+set.seed(7)
+
+individuals=unique(fam$V2)
+numInd=length(individuals)
+print(numInd)
+
+CaseControlVector=(rbinom(n=numInd, size=1, prob=0.5)+1)
+
+fam$V6=CaseControlVector
+
+
+```
+
+
+```{r}
+library(data.table)
+phenotable=data.table(v1=fam$V1, v2=fam$V2, v6=fam$V6)
+
+SexUnknown=which(fam$V5==0)
+
+phenotable=phenotable[-c(SexUnknown),]
+
+
+##drop IDs with non maching 
+loc1=which(phenotable$v2=='HG01241')
+phenotable=phenotable[-loc1,]
+
+loc2=which(phenotable$v2=='HG01242')
+phenotable=phenotable[-loc2,]
+
+loc3=which(phenotable$v2=='HG01108')
+phenotable=phenotable[-loc3,]
+
+loc4=which(phenotable$v2=='NA20314')
+phenotable=phenotable[-loc4,]
+
+
+##DROP individuals with sex incorrectly labelled
+loc5=which(phenotable$v2=='NA21310')
+phenotable=phenotable[-loc5,]
+
+
+write.table(phenotable, "phenotypes.txt", col.names = F, row.names = F, quote = F)
+
+
+```
+
+## Running a GWAS: Plink Commands
+
+Plink was used to complete the GWAS. First, the phenotype.txt file was used to filter the dataset and produce .bed files for the 1736 individuals to be included in the analysis. The following code was used:
+
+plink --bfile indep –pheno phenotypes.txt --prune --make-bed --out MSG_GWAS
+
+Next, we filtered the data prior to analysis. SNPs with minor alleles having a frequency of less than 5% of the total allele pool were excluded. Moreover, we limited our analysis to the autosomes (chromosomes 1-22). 
+
+plink --bfile MSG_GWAS --chr 1-22 --maf 0.05 --make-bed --out MSG_GWAS_clean
+
+Finally, the association test was completed using logistic regression. Logistic regression was chosen as the phenotype data are discrete. 
+
+plink --bfile MSG_GWAS_clean --logistic sex hide-covar --out MSG_GWAS_sex
+
+The .assoc.logistic files were produced and uploaded into R Studio for visualization. 
+
+
+## Visualizing the GWAS: Histogram, QQ plot, and Manhattan Plot
+
+Using the assoc.logistic files produced by plink, and code from the NA_removal.R file, the results of the logistic association test were filtered to remove null values and sort the data for the top 50 SNPs identified by the association test. The code for these operations is below: 
+
+
+
+```{r}
+
+results <- read.table("MSG_GWAS_sex.assoc.logistic",  
+                      header = TRUE, 
+                      sep = "", 
+                      fill = TRUE, 
+                      quote = "", 
+                      check.names = FALSE)
+
+
+NA_removed <- as.data.frame( na.omit(results))
+
+
+write.table(NA_removed, 
+            "GWAS_results_na_removed.assoc.logistic", 
+            append=FALSE, 
+            sep='\t', 
+            row.names=FALSE, 
+            col.names=TRUE, 
+            quote=FALSE)
+
+
+sorted <- NA_removed[order(NA_removed$"P"),]
+
+#assigns the first 50 rows of the sorted data frame to the table top50
+#             - this is done by subseting the table with the indices 1,...,50
+top50 <- sorted[1:50,]
+
+write.table(NA_removed, 
+            "GWAS_results_top50_SNPs.assoc.logistic", 
+            append=FALSE, 
+            sep='\t', 
+            row.names=FALSE, 
+            col.names=TRUE, 
+            quote=FALSE)
+
+```
+
+Next, the data with removed NA values was used to produce the histogram, QQ plot, and Manhattan plot. The code and resulting plots can be seen below:
+
+```{r, eval=FALSE}
+
+data <- read.table("GWAS_results_na_removed.assoc.logistic", header=TRUE, sep = "",
+fill = TRUE, quote = "")
+hist(as.numeric(data$P),
+main="p-value Distribution",
+xlab="p-values",
+ylab="Frequency",
+breaks = seq(0,1,0.05),
+freq = TRUE, cex = 3)
+
+library("qqman")
+qq(data$P,
+main = "Q-Q plot"
+)
+
+library("qqman")
+manhattan(data,
+chr="CHR",
+bp="BP",
+p="P",
+snp="SNP",
+main = "Manhattan plot"
+)
+
+
+```
+
+![](./assignment1PvalDist.png)
+![](./Assignment1QQplot.png)
+![](Assignment1Manhattan.png)
+
+
+
+
+
+## Principal Component Analysis (PCA)
+
+
+PCA is a dimensionality reduction technique often used to represent high-dimensional data in a reduced number of dimensions or vectors. This technique can be helpful in visualizing similarities in the genotypes present in your dataset, as was demonstrated by Roslin et al. In their report, they identified the four individuals that did not cluster well with their continental groups. 
+We attempted to recreate the PCA performed by Roslin et al. using the Plink built-in functionality. To do this, the following command was applied to the 1756 individuals from the indep dataset: 
+
+	plink --bfile indep --chr 1-22 --pca --out plinkPCA
+	
+The output file was a collection of eigenvectors and eigenvalues that can be used to visualize the PCA results. The results in the report by Roslin et al. grouped the samples by continental groups, and population codes provided in Appendix 2 of the report were no longer available. I found population codes reported on the 1000 genome project webpage for the dataset. However, not all individuals in the eigenvector PCA results were present in the Population code database and thus, after filtering, the table was reduced to 1662 individuals with associated population codes. Nonetheless, I was able to visualize the PCA plot for these samples, coded for their continental location. The results of this PCA are visualized below, with the code to produce the visualizations. The PCA plot is consistent with the plot produced by Roslin et al. despite using different algorithms to produce the plot (plink PCA vs SmartPCA) and having a reduced number of samples visualized (1662 vs 1736). 
+
+
+
+```{r}
+
+eigenValues= read.delim("plinkPCA.eigenval", sep =" ", header = FALSE)
+eigenVectors= read.delim("plinkPCA.eigenvec", sep= " ", header=F)
+
+eigen_percent =round((eigenValues / (sum(eigenValues))*100), 2)
+
+populationresults =read.table("omni25.2141.sample.panel",  
+                      header = FALSE, 
+                      sep = "", 
+                      fill = TRUE, 
+                      quote = "", 
+                      check.names = FALSE)
+
+library(data.table)
+
+# set as data.table
+lapply(list(eigenVectors, populationresults), \(i) setDT(i))
+
+names(eigenVectors)[names(eigenVectors)=="V2"]="ID"
+names(populationresults)[names(populationresults)=="V1"]="ID"
+
+
+# inner join
+vectors=eigenVectors[populationresults, on=.(ID), nomatch=0]
+
+
+library(ggplot2)
+
+
+#plot_ly(x=vectors$V3, y=vectors$V4, z=vectors$V5, color = vectors$V2, type="scatter3d", mode="markers")
+
+
+
+ggplot(data = vectors) +
+  geom_point(mapping = aes(x = V3, y = V4, color=V2), size = 2, show.legend = TRUE) +
+  geom_hline(yintercept = 0, linetype="dotted") +
+  geom_vline(xintercept = 0, linetype="dotted") +
+  labs(title = "PCA of selected Individuals",
+      x = paste0("Principal component 1 (",eigen_percent[1,1]," %)"),
+      y = paste0("Principal component 2 (",eigen_percent[2,1]," %)"),
+      colour = "", shape = "") +
+  guides(color = guide_legend(override.aes = list(size = 0.7)))+
+  theme_minimal()
+```
+
+# Discussion
+
+We performed a GWAS analysis on the samples identified by Roslin et al. to be of high quality and consisting only of unrelated individuals. The sample dataset provided consisted of 1756 individuals and 1 989 184 SNPs. This dataset was filtered to remove individuals with missing/incorrect sex data and a genotypic profile inconsistent with their continental location, leaving a total of 1736 individuals for association analysis. 
+
+Logistic regression was performed to determine SNPs associated with either cases or controls. However, case and control data were randomly assigned to highlight the limitation of statistical inference, with nearly 2 million parameters being tested on 1736 samples. Given this experimental setup, we expect to see an approximately equal distribution of p-values across all values from 0 to 1 in a histogram of p-values. Indeed, observing the histogram, we see almost an equal frequency of all possible p-values, with lower p-values occurring with slightly less regularity. The slight deviation away from higher p-values may be explained by random chance. A random case-control vector was created during the analysis while setting a seed for replicability. When repeating the analysis with other classmates, it was noted that depending on your choice of seed, you may produce a histogram of p-values with slight deviations from an even distribution of all p-values. The Q-Q plot similarly shows that most of the data follows the expected p-value distribution we would expect, with some deviation in points with smaller p-values. 
+
+The Manhattan plot displays that most p-values do not cross the threshold to significance, and there is no strong association between case and control with any specific region of the genome. However, there are still points that achieve statistical significance with our test; this is intriguing given that the case and control individuals are randomly assigned, and there should be no association between specific SNPs and the cases when compared to the controls. This aptly displays the multiple-testing problem, whereby if numerous statistical tests are performed, there is a high likelihood of identifying significant associations by chance alone. 
+
+Overall, I was able to perform a GWAS of data that had been previously subject to quality control processing. Additionally, I was able to recapitulate a PCA that agreed with the one reported by Roslin et al. Throughout this project, I was able to familiarize myself with the Plink documentation, became more familiar with file types used in GWAS analysis, and became more comfortable with command-line analysis tools, all indispensable skills for a future in genetic research. 
+
+
+# References
+
+1. Uffelmann E, Huang QQ, Munung NS, de Vries J, Okada Y, Martin AR, et al. Genome-wide association studies. Nature Reviews Methods Primers. 2021;1(1). doi:10.1038/s43586-021-00056-9 
+2. Roslin NM, Weili L, Paterson AD, Strug LJ. Quality Control Analysis of the 1000 genomes project OMNI25 genotypes. 2016; doi:10.1101/078600 
+3. Chang CC, Chow CC, Tellier LC, Vattikuti S, Purcell SM, Lee JJ. Second-generation PLINK: Rising to the challenge of larger and richer datasets. GigaScience. 2015;4(1). doi:10.1186/s13742-015-0047-8 
+4. Sugolov A, Emmenegger E, Paterson AD, Sun L. Statistical learning of large-scale genetic data: How to run a genome-wide association study of gene-expression data using the 1000 Genomes Project Data. Statistics in Biosciences. 2023; doi:10.1007/s12561-023-09375-9 
+5. Quality Control for 1000 genomes [Internet]. [cited 2023 Oct 10]. Available from: https://tcag.ca/tools/1000genomes.html 
+
+
+
+
+
+
